@@ -73,3 +73,6 @@ def with_check(func: Callable[Spec, Any], /) -> Callable[Spec, Any]:
         return tuple(rest)
 
     return wrapped
+
+
+Todo = NotImplementedError

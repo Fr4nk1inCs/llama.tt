@@ -6,9 +6,7 @@ from triton.backends.compiler import GPUTarget
 from triton.backends.nvidia.driver import CudaLauncher, CudaUtils, ty_to_cpp
 from triton.testing import do_bench
 
-from llama_tt.dtype import int32
-from llama_tt.ops.elemwise import fill
-from llama_tt.tensor import DeviceTensor
+from llama_tt.lighter import DeviceTensor, int32
 from llama_tt.utils import with_check
 
 
@@ -51,10 +49,10 @@ class CudaDriver(DriverBase):
 
     def get_empty_cache_for_benchmark(self):
         cache_size = 256 * 1024 * 1024  # 256MB
-        return DeviceTensor.alloc((cache_size // 4,), dtype=int32)
+        return DeviceTensor.empty((cache_size // 4,), dtype=int32)
 
     def clear_cache(self, cache: DeviceTensor):
-        fill(cache, 0)
+        cache.fill_(0)
 
     @classmethod
     @no_type_check

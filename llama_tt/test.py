@@ -1,10 +1,9 @@
 import logging
 
+import numpy as np
+
+from llama_tt import lighter
 from llama_tt.driver import setup_driver
-from llama_tt.dtype import float32
-from llama_tt.ops.elemwise import add, fill
-from llama_tt.ops.reduce import all_eq
-from llama_tt.tensor import DeviceTensor
 from llama_tt.utils import setup_logger
 
 logger = logging.getLogger(__name__)
@@ -13,15 +12,17 @@ if __name__ == "__main__":
     setup_logger(logging.DEBUG)
     setup_driver()
 
-    a = DeviceTensor.alloc([1024, 512], float32)
-    b = DeviceTensor.alloc([1024, 512], float32)
+    a_cpu = np.random.rand(1024, 1024).astype(np.float32)
+    b_cpu = np.random.rand(1024, 1024).astype(np.float32)
 
-    fill(a, 1.0)
-    fill(b, 2.0)
+    a_dev = lighter.from_numpy(a_cpu)
+    b_dev = lighter.from_numpy(b_cpu)
 
-    c = add(a, b)
+    c_cpu = a_cpu + b_cpu
+    c_dev = a_dev + b_dev
 
-    if all_eq(c, 3.0):
-        logger.info("Test passed: all elements in c are equal to 3.0")
-    else:
-        logger.error("Test failed: not all elements in c are equal to 3.0")
+    c_dev_host = c_dev.numpy()
+
+    np.testing.assert_allclose(c_dev_host, c_cpu)
+
+    logger.info("Test passed!")

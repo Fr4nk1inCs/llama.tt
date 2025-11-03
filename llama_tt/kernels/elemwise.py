@@ -1,18 +1,12 @@
 from typing import no_type_check
 
-import triton
 import triton.language as tl
-
-from llama_tt.dtype import Scalar
-from llama_tt.tensor import DeviceTensor
-from llama_tt.utils import cdiv
-
-BLOCK_SIZE = 1024
+from triton import jit
 
 
-@triton.jit
+@jit
 @no_type_check
-def _fill_kernel(
+def fill_kernel(
     ptr: tl.pointer_type,
     val,
     numel,
@@ -25,19 +19,9 @@ def _fill_kernel(
     tl.store(ptr + offsets, val, mask=mask)
 
 
-def fill(tensor: DeviceTensor, value: Scalar):
-    grid = (cdiv(tensor.numel(), BLOCK_SIZE),)
-    _fill_kernel[grid](
-        tensor,
-        value,
-        tensor.numel(),
-        BLOCK_SIZE,
-    )
-
-
-@triton.jit
+@jit
 @no_type_check
-def _add_kernel(
+def add_kernel(
     a_ptr: tl.pointer_type,
     b_ptr: tl.pointer_type,
     c_ptr: tl.pointer_type,
@@ -52,19 +36,3 @@ def _add_kernel(
     b_vals = tl.load(b_ptr + offsets, mask=mask)
     c_vals = a_vals + b_vals
     tl.store(c_ptr + offsets, c_vals, mask=mask)
-
-
-def add(
-    a: DeviceTensor, b: DeviceTensor, out: DeviceTensor | None = None
-) -> DeviceTensor:
-    if out is None:
-        out = DeviceTensor.alloc(a.shape, a.dtype, a.strides)
-    grid = (cdiv(a.numel(), BLOCK_SIZE),)
-    _add_kernel[grid](
-        a,
-        b,
-        out,
-        a.numel(),
-        BLOCK_SIZE,
-    )
-    return out

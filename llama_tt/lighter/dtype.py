@@ -1,11 +1,11 @@
-import struct
-from typing import Callable, TypeVar, override
+from typing import override
 
 import numpy as np
 import numpy.typing as npt
 import triton.language as tl
 
-Scalar = int | float | bool
+npdtype_mapping: dict[np.dtype, "dtype"] = {}
+tldtype_mapping: dict[tl.dtype, "dtype"] = {}
 
 
 class dtype:
@@ -15,13 +15,15 @@ class dtype:
         nbytes: int,
         triton_dtype: tl.dtype,
         numpy_dtype: npt.DTypeLike,
-        interpret_memory: Callable[[bytes], Scalar],
     ):
         self._name: str = name
         self._bytes: int = nbytes
         self._triton_dtype: tl.dtype = triton_dtype
         self._numpy_dtype: npt.DTypeLike = numpy_dtype
-        self.interpret_memory: Callable[[bytes], Scalar] = interpret_memory
+
+        global npdtype_mapping, tldtype_mapping
+        npdtype_mapping[np.dtype(numpy_dtype)] = self
+        tldtype_mapping[triton_dtype] = self
 
     @property
     def name(self) -> str:
@@ -44,8 +46,10 @@ class dtype:
         return self._name
 
 
-float32 = dtype(
-    "float32", 4, tl.float32, np.float32, lambda b: struct.unpack("f", b)[0]
+float32 = dtype("float32", 4, tl.float32, np.float32)
+int32 = dtype("int32", 4, tl.int32, np.int32)
+bool_ = dtype("bool", 1, tl.int1, np.bool_)
+
+CorrespondingNDArrays = (
+    npt.NDArray[np.float32] | npt.NDArray[np.int32] | npt.NDArray[np.bool_]
 )
-int32 = dtype("int32", 4, tl.int32, np.int32, lambda b: struct.unpack("i", b)[0])
-bool_ = dtype("bool", 1, tl.int1, np.bool_, lambda b: bool(int.from_bytes(b, "little")))
