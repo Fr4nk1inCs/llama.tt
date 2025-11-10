@@ -1,50 +1,36 @@
 from typing import no_type_check, override
 
-import cuda.bindings.runtime as cudart
 from triton.backends import Backend, DriverBase, backends
 from triton.backends.compiler import GPUTarget
 from triton.backends.nvidia.driver import CudaLauncher, CudaUtils, ty_to_cpp
 from triton.testing import do_bench
 
 from llama_tt.lighter import DeviceTensor, int32
-from llama_tt.utils import with_check
-
-
-class MockTorchDevice:
-    def __init__(self, type: str, index: int) -> None:
-        self.type: str = type
-        self.index: int = index
+from llama_tt.lighter.cudart import (cuda_get_device_count,
+                                     cuda_get_device_properties,
+                                     current_device, get_current_stream,
+                                     set_current_device)
 
 
 class CudaDriver(DriverBase):
     def __init__(self) -> None:
         self.utils: CudaUtils = CudaUtils()
         self.launcher_cls: type[CudaLauncher] = CudaLauncher
-
-        self.device_to_stream: dict[int, int] = {}
-
         super().__init__()
 
     def get_current_device(self) -> int:
-        return with_check(cudart.cudaGetDevice)()
+        return current_device
 
     def set_current_device(self, device: int) -> None:
-        with_check(cudart.cudaSetDevice)(device)
+        set_current_device(device)
 
     def get_current_stream(self, device: int | None) -> int:
-        if device is None:
-            device = self.get_current_device()
-        if device not in self.device_to_stream:
-            stream = with_check(cudart.cudaStreamCreateWithFlags)(
-                cudart.cudaStreamDefault
-            )
-            self.device_to_stream[device] = int(stream)
-        return self.device_to_stream[device]
+        return int(get_current_stream(device))
 
     def get_device_capability(self, device: int | None) -> tuple[int, int]:
         if device is None:
-            device = self.get_current_device()
-        props = with_check(cudart.cudaGetDeviceProperties)(device)
+            device = current_device
+        props = cuda_get_device_properties(device)
         return props.major, props.minor
 
     def get_empty_cache_for_benchmark(self):
@@ -52,12 +38,12 @@ class CudaDriver(DriverBase):
         return DeviceTensor.empty((cache_size // 4,), dtype=int32)
 
     def clear_cache(self, cache: DeviceTensor):
-        cache.fill_(0)
+        _ = cache.fill_(0)
 
     @classmethod
     @no_type_check
     def is_active(self):
-        device_count = with_check(cudart.cudaGetDeviceCount)()
+        device_count = cuda_get_device_count()
         return device_count > 0
 
     @override

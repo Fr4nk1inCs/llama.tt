@@ -3,7 +3,7 @@ import logging
 import numpy as np
 
 from llama_tt import lighter
-from llama_tt.driver import setup_driver
+from llama_tt.lighter.driver import setup_driver
 from llama_tt.log import setup_logger
 
 logger = logging.getLogger(__name__)

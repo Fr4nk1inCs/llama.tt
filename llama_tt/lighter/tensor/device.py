@@ -1,19 +1,20 @@
 import logging
 from collections.abc import Sequence
 from functools import cache, reduce
-from typing import Self, cast
+from typing import Self, override
 
-import cuda.bindings.runtime as cudart
 import numpy as np
+from cuda.bindings.runtime import cudaMemcpyKind
 
-from llama_tt.kernels.elemwise import add_kernel, fill_kernel
-from llama_tt.lighter.dtype import (CorrespondingNDArrays, dtype,
+from llama_tt.kernels.elemwise import add, contiguous, fill_
+from llama_tt.kernels.elemwise.uniary import to_dtype
+from llama_tt.lighter.cudart import free, malloc, memcpy
+from llama_tt.lighter.dtype import (CorrespondingNDArrays, Scalar, dtype,
                                     npdtype_mapping)
-from llama_tt.utils import cdiv, int_mul, with_check
+from llama_tt.lighter.tensor.base import TensorBase
+from llama_tt.utils import int_mul
 
 logger = logging.getLogger(__name__)
-
-Scalar = int | float | bool
 
 
 class DeviceHandle:
@@ -27,12 +28,12 @@ class DeviceHandle:
     @classmethod
     def allocate(cls, nbytes: int) -> "DeviceHandle":
         logger.debug("Allocating %d bytes of device memory", nbytes)
-        ptr = cast(int, with_check(cudart.cudaMalloc)(nbytes))
+        ptr = malloc(nbytes)
         return cls(ptr)
 
     def __del__(self):
         logger.debug("Freeing device memory at ptr 0x%x", self._ptr)
-        with_check(cudart.cudaFree)(self._ptr)
+        free(self._ptr)
 
 
 class DevicePointer:
@@ -58,11 +59,11 @@ class DevicePointer:
         return cls(handle)
 
 
-class DeviceTensor:
+class DeviceTensor(TensorBase):
     """
     A tensor is a multi-dimensional array stored on a contiguous block of device
     memory. While the underlying memory is contiguous, the tensor can have
-    arbitrary shape and strides, making the actual data layout non-contiguous.
+    arbitrary shape and strides, making the actual layout non-contiguous.
     """
 
     def __init__(
@@ -90,6 +91,7 @@ class DeviceTensor:
             self._strides = self._compute_default_strides(shape)
             self._is_contiguous = True
 
+        self._dim: int = len(shape)
         self._numpied: CorrespondingNDArrays | None = None
 
     def _compute_default_strides(
@@ -111,22 +113,32 @@ class DeviceTensor:
             expected_stride *= self.shape[dim]
         return True
 
+    @override
     def data_ptr(self) -> int:
         return self._handle.ptr
 
     @property
+    @override
+    def dim(self) -> int:
+        return self._dim
+
+    @property
+    @override
     def dtype(self) -> "dtype":
         return self._dtype
 
     @property
+    @override
     def shape(self) -> Sequence[int]:
         return self._shape
 
     @property
+    @override
     def numel(self) -> int:
         return self._numel
 
     @property
+    @override
     def strides(self) -> Sequence[int]:
         return self._strides
 
@@ -134,12 +146,14 @@ class DeviceTensor:
         return self._strides[dim]
 
     @property
+    @override
     def is_contiguous(self) -> bool:
         return self._is_contiguous
 
     """Creation"""
 
     @classmethod
+    @override
     def empty(
         cls, shape: Sequence[int], dtype: "dtype", strides: Sequence[int] | None = None
     ) -> "DeviceTensor":
@@ -155,7 +169,27 @@ class DeviceTensor:
         handle: DeviceHandle = DeviceHandle.allocate(nbytes)
         return cls(handle, shape, dtype, strides)
 
+    @override
+    def empty_like(self, contiguous: bool = False) -> "DeviceTensor":
+        if contiguous:
+            return DeviceTensor.empty(self.shape, self.dtype)
+        return DeviceTensor.empty(self.shape, self.dtype, self.strides)
+
+    @override
+    def new_empty(self, *size: int, dtype: "dtype | None" = None) -> "DeviceTensor":
+        return DeviceTensor.empty(size, dtype or self.dtype)
+
+    def contiguous(self) -> "DeviceTensor":
+        if self._is_contiguous:
+            return self
+        return contiguous(self)
+
     """Data Transfer"""
+
+    def to_dtype(self, dtype: "dtype") -> "DeviceTensor":
+        if self.dtype == dtype:
+            return self
+        return to_dtype(dtype)(self)
 
     @classmethod
     def from_numpy(cls, array: CorrespondingNDArrays) -> "DeviceTensor":
@@ -164,11 +198,11 @@ class DeviceTensor:
         itemsize = array.dtype.itemsize
         strides = tuple(s // itemsize for s in array.strides)
         tensor = cls.empty(shape, dtype, strides)
-        with_check(cudart.cudaMemcpy)(
+        memcpy(
             tensor.data_ptr(),
             array.ctypes.data,
             array.nbytes,
-            cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+            cudaMemcpyKind.cudaMemcpyHostToDevice,
         )
         return tensor
 
@@ -177,13 +211,16 @@ class DeviceTensor:
             return self._numpied
 
         assert self.is_contiguous, "numpy() only supports contiguous tensors"
+        assert (
+            self.dtype.numpy_dtype is not None
+        ), f"numpy() does not support dtype {self.dtype}"
         nbytes = self.numel * self.dtype.bytes
         self._numpied = np.empty(self.shape, dtype=self.dtype.numpy_dtype)
-        with_check(cudart.cudaMemcpy)(
+        memcpy(
             self._numpied.ctypes.data,
             self.data_ptr(),
             nbytes,
-            cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+            cudaMemcpyKind.cudaMemcpyDeviceToHost,
         )
         return self._numpied
 
@@ -192,6 +229,7 @@ class DeviceTensor:
             raise ValueError("Can only call item() on tensors with one element")
         return self.numpy().item()
 
+    @override
     def __repr__(self) -> str:
         return (
             f"DeviceTensor({np.array2string(self.numpy())}, dtype={self.dtype}, "
@@ -203,24 +241,10 @@ class DeviceTensor:
     """In-place operations"""
 
     def fill_(self, value: Scalar) -> Self:
-        assert self.is_contiguous, "fill_ only supports contiguous tensors"
         self._numpied = None  # Invalidate cached numpy array
-
-        BLOCK_SIZE = 1024
-        numel = self.numel
-        grid = (cdiv(numel, BLOCK_SIZE),)
-        fill_kernel[grid](self, value, numel, BLOCK_SIZE=1024)
-        return self
+        return fill_(self, value)
 
     """Computation"""
 
     def __add__(self, other: "DeviceTensor") -> "DeviceTensor":
-        assert self.shape == other.shape, "Shapes must match for addition"
-        assert self.strides == other.strides, "Strides must match for addition"
-
-        output = DeviceTensor.empty(self.shape, self.dtype, self.strides)
-        BLOCK_SIZE = 1024
-        numel = self.numel
-        grid = (cdiv(numel, BLOCK_SIZE),)
-        add_kernel[grid](self, other, output, numel, BLOCK_SIZE=BLOCK_SIZE)
-        return output
+        return add(self, other)

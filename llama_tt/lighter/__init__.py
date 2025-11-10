@@ -1,5 +1,7 @@
+from .dtype import bfloat16 as bfloat16
 from .dtype import bool_ as bool
 from .dtype import dtype as dtype
+from .dtype import float16 as float16
 from .dtype import float32 as float32
 from .dtype import int32 as int32
 from .ops import add as add
